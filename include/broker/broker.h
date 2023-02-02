@@ -13,55 +13,65 @@ struct Message
     std::string payload;
 };
 
-class MessageStore
-{
-public:
-    MessageStore(const std::string& file_name)
-        : file_name_(file_name)
-    {
-        // load messages from disk
-        std::ifstream file(file_name, std::ios::binary);
-        while (file)
-        {
-            Message message;
-            file.read(reinterpret_cast<char*>(&message), sizeof(message));
-            if (file)
-                messages_.push_back(message);
-        }
-    }
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <cstring>
 
-    void AddMessage(const Message& message)
-    {
-        messages_.push_back(message);
-        if (messages_.size() > buffer_size)
-            Flush();
-    }
+class MessageStore {
+ public:
+  MessageStore(size_t buffer_size) : buffer_size_(buffer_size), head_(0), tail_(0) {}
 
-    std::vector<Message> GetMessages(const std::string& topic)
-    {
-        std::vector<Message> result;
-        for (const auto& message : messages_)
-        {
-            if (message.topic == topic)
-                result.push_back(message);
-        }
-        return result;
-    }
+  void AddMessage(const std::string& message) {
+    // Save the message to the buffer
+    buffer_[head_] = message;
+    head_ = (head_ + 1) % buffer_size_;
+    if (head_ == tail_)
+      tail_ = (tail_ + 1) % buffer_size_;
 
-private:
-    void Flush()
-    {
-        std::ofstream file(file_name_, std::ios::binary | std::ios::app);
-        for (const auto& message : messages_)
-        {
-            file.write(reinterpret_cast<const char*>(&message), sizeof(message));
-        }
-        file.close();
-        messages_.clear();
-    }
+    // Open the head-tail indices file in write mode
+    std::ofstream head_tail_file("head_tail.bin", std::ios::binary);
+    head_tail_file.write((char*)&head_, sizeof(head_));
+    head_tail_file.write((char*)&tail_, sizeof(tail_));
+    head_tail_file.close();
 
-    std::string file_name_;
-    std::vector<Message> messages_;
+    // Open the message store file in write mode and append the message
+    std::ofstream file("message_store.bin", std::ios::app | std::ios::binary);
+    size_t message_size = message.size();
+    file.write((char*)&message_size, sizeof(message_size));
+    file.write(message.c_str(), message.size());
+    file.close();
+  }
+
+  std::vector<std::string> GetMessages() {
+    std::vector<std::string> messages;
+
+    // Open the head-tail indices file in read mode
+    std::ifstream head_tail_file("head_tail.bin", std::ios::binary);
+    head_tail_file.read((char*)&head_, sizeof(head_));
+    head_tail_file.read((char*)&tail_, sizeof(tail_));
+    head_tail_file.close();
+
+    // Open the message store file in read mode
+    std::ifstream file("message_store.bin", std::ios::binary);
+    while (tail_ != head_) {
+      size_t message_size;
+      file.read((char*)&message_size, sizeof(message_size));
+      std::vector<char> message_buffer(message_size);
+      file.read(message_buffer.data(), message_size);
+      messages.push_back(std::string(message_buffer.begin(), message_buffer.end()));
+      tail_ = (tail_ + 1) % buffer_size_;
+    }
+    file.close();
+
+    return messages;
+  }
+
+ private:
+  size_t buffer_size_;
+  std::string buffer_[100];
+  size_t head_;
+  size_t tail_;
 };
 
 
@@ -108,11 +118,6 @@ void MessageBroker::process_message(const Message& message)
         }
     }
 
-    if (confirmations_received == subscribers.size())
-    {
-        // All confirmations have been received, so remove the message from the store
-        message_store.remove_message(message.id);
-    }
 }
 
 
@@ -197,3 +202,39 @@ int main()
     return 0;
 }
 
+
+/*
+#include <iostream>
+#include <zmq.hpp>
+
+int main()
+{
+    // Connect to the message broker
+    zmq::context_t context;
+    zmq::socket_t subscriber(context, ZMQ_SUB);
+    subscriber.connect("tcp://localhost:5555");
+
+    // Subscribe to all messages
+    subscriber.setsockopt(ZMQ_SUBSCRIBE, "", 0);
+
+    while (true)
+    {
+        // Receive a message
+        zmq::message_t message;
+        subscriber.recv(&message);
+
+        // Process the message
+        std::string message_str(static_cast<char*>(message.data()), message.size());
+        std::cout << "Received message: " << message_str << std::endl;
+
+        // Send a confirmation to the broker
+        zmq::socket_t confirmation_sender(context, ZMQ_PUSH);
+        confirmation_sender.connect("tcp://localhost:5556");
+        zmq::message_t confirmation(5);
+        memcpy(confirmation.data(), "ACK", 5);
+        confirmation_sender.send(confirmation);
+    }
+
+    return 0;
+}
+*/
